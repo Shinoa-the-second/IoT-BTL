@@ -1,0 +1,139 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+
+// ================= 1. THAY THONG TIN CUA BAN VAO DAY =================
+const char* ssid = "TEN_WIFI_NHA_BAN";          // Luu ý: Dùng Wi-Fi bang t?n 2.4GHz
+const char* password = "MAT_KHAU_WIFI_NHA_BAN"; 
+const char* tb_token = "DAN_ACCESS_TOKEN_VAO_DAY"; 
+
+// N?u b?n dang ký ? demo.thingsboard.io thì d?i dòng du?i thành "demo.thingsboard.io"
+const char* tb_server = "thingsboard.cloud";    
+const int tb_port = 1883;
+// =====================================================================
+
+#define ONBOARD_LED 2 // Chân dèn LED xanh duong tích h?p s?n trên m?t ESP32
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+unsigned long lastSend = 0;
+bool lightState = false;
+String currentMode = "AUTO";
+
+// Hàm x? lý khi nh?n l?nh di?u khi?n (RPC) t? Web ThingsBoard g?i xu?ng
+void on_message(char* topic, byte* payload, unsigned int length) {
+  Serial.println("\n--- NHAN LENH RPC TU THINGSBOARD ---");
+  
+  char json[length + 1];
+  strncpy(json, (char*)payload, length);
+  json[length] = '\0';
+  Serial.print("Noi dung goi tin: ");
+  Serial.println(json);
+
+  // Gi?i mã JSON
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, json);
+  if (error) {
+    Serial.println("Loi doc JSON!");
+    return;
+  }
+
+  String methodName = String((const char*)doc["method"]);
+
+  // N?u trên Web g?t nút có method là "setLight"
+  if (methodName == "setLight") {
+    lightState = doc["params"];
+    digitalWrite(ONBOARD_LED, lightState ? HIGH : LOW);
+    Serial.print("-> Da cap nhat trang thai Den (LED tren mach): ");
+    Serial.println(lightState ? "BAT (ON)" : "TAT (OFF)");
+  }
+  // N?u trên Web d?i ch? d? ho?t d?ng qua method "setMode"
+  else if (methodName == "setMode") {
+    currentMode = String((const char*)doc["params"]);
+    Serial.print("-> Da chuyen Kich ban phong hoc sang: ");
+    Serial.println(currentMode);
+  }
+
+  // Ph?n h?i l?i tr?ng thái lên ThingsBoard
+  String topicStr = String(topic);
+  String requestId = topicStr.substring(topicStr.lastIndexOf('/') + 1);
+  String responseTopic = "v1/devices/me/rpc/response/" + requestId;
+  client.publish(responseTopic.c_str(), json);
+}
+
+// Hàm k?t n?i Wi-Fi
+void setup_wifi() {
+  Serial.print("\nDang ket noi Wi-Fi: ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n[OK] Da ket noi Wi-Fi! IP: " + WiFi.localIP().toString());
+}
+
+// Hàm k?t n?i l?i MQTT khi b? r?t m?ng
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("Dang ket noi MQTT len ThingsBoard...");
+    if (client.connect("ESP32_SmartClassroom", tb_token, NULL)) {
+      Serial.println(" [THANH CONG!]");
+      // Ðang ký l?ng nghe l?nh di?u khi?n t? xa (RPC)
+      client.subscribe("v1/devices/me/rpc/request/+");
+    } else {
+      Serial.print(" [THAT BAI, ma loi rc=");
+      Serial.print(client.state());
+      Serial.println("] -> Thu lai sau 3 giay...");
+      delay(3000);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(ONBOARD_LED, OUTPUT);
+  digitalWrite(ONBOARD_LED, LOW);
+
+  setup_wifi();
+  client.setServer(tb_server, tb_port);
+  client.setCallback(on_message);
+}
+
+void loop() {
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
+
+  // C? m?i 3 giây (3000ms) d?y d? li?u gi? l?p lên ThingsBoard 1 l?n
+  unsigned long now = millis();
+  if (now - lastSend > 3000) {
+    lastSend = now;
+
+    // T?o s? li?u gi? l?p gi?ng phòng h?c th?t
+    float simTemp = 27.0 + (random(0, 50) / 10.0); // 27.0 -> 32.0 d? C
+    float simHum  = 60.0 + (random(0, 150) / 10.0); // 60.0 -> 75.0 %
+    int simLight  = random(40, 90);                 // Ð? sáng 40 -> 90%
+
+    // Ðóng gói chu?i JSON
+    StaticJsonDocument<256> doc;
+    doc["temperature"] = simTemp;
+    doc["humidity"] = simHum;
+    doc["light_level"] = simLight;
+    doc["motion_detected"] = true;
+    doc["light_relay"] = lightState;
+    doc["system_mode"] = currentMode;
+
+    char buffer[256];
+    serializeJson(doc, buffer);
+
+    // G?i lên topic Telemetry chu?n c?a ThingsBoard
+    client.publish("v1/devices/me/telemetry", buffer);
+
+    Serial.print("Da gui Telemetry: ");
+    Serial.println(buffer);
+  }
+}
